@@ -994,8 +994,8 @@ const handleKeydown = (e) => {
     }
   }
 
-  // 工具切换的快捷键
-  if (!isCtrl && !e.metaKey && !e.altKey) {
+  // 工具切换的快捷键（Alt+对应键触发）
+  if (e.altKey && !isCtrl && !e.metaKey) {
     const tool = Object.keys(toolShortcuts).find(t => toolShortcuts[t] === key)
     if (tool) {
       e.preventDefault()
