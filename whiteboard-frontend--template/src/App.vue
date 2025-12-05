@@ -1,4 +1,5 @@
 <template>
+  <!-- 模板部分完全不变，和之前一致 -->
   <div class="app-container">
     <!-- 管理界面 -->
     <div class="board-manager" :style="{ display: showBoardManager ? 'block' : 'none' }">
@@ -168,6 +169,8 @@
 
       <div class="canvas-tip" :style="{ display: canvasReady ? 'block' : 'none' }">
         选择模式：Ctrl+滚轮缩放 | Alt+拖动平移 | Shift+点击多选 | 图形工具：点击拖拽绘制
+        <!-- 新增：离线状态提示 -->
+        <span style="color: #e74c3c; margin-left: 10px;" v-if="!isOnline">（当前离线，内容已缓存，网络恢复后自动保存）</span>
       </div>
 
       <div class="loading-tip" :style="{ display: isLoading ? 'block' : 'none' }">加载中...</div>
@@ -196,6 +199,10 @@ const isLoading = ref(false)
 const canvasReady = ref(false)
 let isNewBoardFlag = false
 const canvasZoom = ref(1.0)
+
+// 新增：离线状态相关变量
+const isOnline = ref(navigator.onLine) // 当前网络状态
+const OFFLINE_SAVE_QUEUE_KEY = 'whiteboard_offline_save_queue' // 离线保存队列的localStorage键名
 
 // 撤销和重做需要用到的变量
 const undoHistory = ref([])
@@ -356,6 +363,81 @@ const redo = () => {
 const canUndo = () => undoHistory.value.length > 1 && canvasReady.value
 const canRedo = () => redoHistory.value.length > 0 && canvasReady.value
 
+// 新增：离线保存 - 获取本地缓存的保存队列
+const getOfflineSaveQueue = () => {
+  try {
+    const queue = localStorage.getItem(OFFLINE_SAVE_QUEUE_KEY)
+    return queue ? JSON.parse(queue) : []
+  } catch (err) {
+    console.error('读取离线保存队列失败：', err)
+    return []
+  }
+}
+
+// 新增：离线保存 - 保存队列到本地
+const saveOfflineSaveQueue = (queue) => {
+  try {
+    localStorage.setItem(OFFLINE_SAVE_QUEUE_KEY, JSON.stringify(queue))
+  } catch (err) {
+    console.error('保存离线队列失败：', err)
+  }
+}
+
+// 新增：离线保存 - 添加保存请求到队列
+const addToOfflineSaveQueue = (requestData) => {
+  const queue = getOfflineSaveQueue()
+  // 去重：避免同一白板重复保存（只保留最新的一条）
+  const filteredQueue = queue.filter(item => item.boardId !== requestData.boardId)
+  filteredQueue.push({
+    ...requestData,
+    timestamp: Date.now() // 记录时间戳，用于排序
+  })
+  saveOfflineSaveQueue(filteredQueue)
+  console.log('离线保存请求已缓存，网络恢复后自动发送')
+}
+
+// 新增：离线保存 - 网络恢复时，发送所有缓存的保存请求
+const sendOfflineSaveQueue = async () => {
+  if (!isOnline.value) return
+  const queue = getOfflineSaveQueue()
+  if (queue.length === 0) return
+
+  isLoading.value = true
+  try {
+    // 按时间戳排序，先发送早的请求
+    const sortedQueue = queue.sort((a, b) => a.timestamp - b.timestamp)
+    for (const request of sortedQueue) {
+      const { boardId, title, content, timestamp } = request
+      // 发送保存请求
+      await fetch('/api/whiteboard/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ boardId, title, content })
+      })
+      console.log(`离线保存同步成功：${boardId}`)
+    }
+    // 清空队列
+    saveOfflineSaveQueue([])
+    // 刷新存档列表
+    await fetchAllBoards()
+    alert('网络已恢复，离线修改的白板内容已自动保存！')
+  } catch (err) {
+    console.error('离线队列同步失败：', err)
+    alert('部分离线内容同步失败，请手动点击"保存白板"重试')
+  } finally {
+    isLoading.value = false
+  }
+}
+
+// 新增：监听网络状态变化
+const handleNetworkStatusChange = () => {
+  isOnline.value = navigator.onLine
+  if (isOnline.value) {
+    // 网络恢复，自动发送离线队列
+    sendOfflineSaveQueue()
+  }
+}
+
 // 页面加载完成后执行的操作
 onMounted(async () => {
   await fetchAllBoards()
@@ -372,6 +454,15 @@ onMounted(async () => {
   }, 500)
   // 绑定键盘按键事件
   window.addEventListener('keydown', handleKeydown)
+  
+  // 新增：监听网络状态
+  window.addEventListener('online', handleNetworkStatusChange)
+  window.addEventListener('offline', handleNetworkStatusChange)
+  
+  // 新增：页面加载时，如果在线，先尝试同步离线队列
+  if (isOnline.value) {
+    setTimeout(() => sendOfflineSaveQueue(), 1000)
+  }
 })
 
 // 页面关闭时执行的操作
@@ -383,6 +474,10 @@ onUnmounted(() => {
     document.removeEventListener('wheel', globalWheelListener, { passive: false, capture: true })
   }
   window.removeEventListener('keydown', handleKeydown)
+  
+  // 新增：移除网络状态监听
+  window.removeEventListener('online', handleNetworkStatusChange)
+  window.removeEventListener('offline', handleNetworkStatusChange)
 })
 
 // 监听全局滚轮事件，处理画布缩放
@@ -426,7 +521,10 @@ const fetchAllBoards = async () => {
     boardList.value = data || []
   } catch (err) {
     console.error('获取存档列表失败：', err)
-    alert('获取存档失败，请检查后端是否启动')
+    // 新增：离线时不弹提示，避免干扰
+    if (isOnline.value) {
+      alert('获取存档失败，请检查后端是否启动')
+    }
   }
 }
 
@@ -472,6 +570,39 @@ const loadBoard = async (boardId) => {
   isNewBoardFlag = false
 
   try {
+    // 新增：离线时尝试从本地缓存加载（如果有）
+    if (!isOnline.value) {
+      const offlineQueue = getOfflineSaveQueue()
+      const cachedBoard = offlineQueue.find(item => item.boardId === boardId)
+      if (cachedBoard) {
+        currentBoardId.value = boardId
+        currentBoardTitle.value = cachedBoard.title
+        showBoardManager.value = false
+
+        await nextTick()
+        const canvas = await initCanvas(cachedBoard.content)
+        canvasInstance.value = canvas
+        canvasReady.value = true
+        canvas.renderAll()
+
+        shareLink.value = ''
+        copySuccess.value = false
+
+        // 初始化撤销重做的历史记录
+        undoHistory.value = []
+        redoHistory.value = []
+        currentBindBoardId = boardId // 绑定当前白板的ID
+        saveCanvasState() // 保存加载后的初始状态
+        isLoading.value = false
+        return
+      } else {
+        alert('当前离线，该白板无本地缓存，无法加载')
+        isLoading.value = false
+        showBoardManager.value = true
+        return
+      }
+    }
+
     const res = await fetch(`/api/whiteboard?id=${boardId}`)
     const data = await res.json()
     if (data.error) throw new Error(data.error)
@@ -507,6 +638,13 @@ const loadBoard = async (boardId) => {
 // 删除白板存档
 const deleteBoard = async (boardId) => {
   if (!confirm('确定要删除这个存档吗？删除后无法恢复！')) return
+  
+  // 新增：离线时提示
+  if (!isOnline.value) {
+    alert('当前离线，无法删除存档，请联网后重试')
+    return
+  }
+  
   try {
     await fetch(`/api/whiteboard/${boardId}`, { method: 'DELETE' })
     boardList.value = boardList.value.filter(board => board.boardId !== boardId)
@@ -588,7 +726,7 @@ const backToManager = async () => {
   }
 }
 
-// 保存白板内容
+// 保存白板内容（修改：增加离线处理）
 const saveWhiteboard = async () => {
   const canvas = canvasInstance.value
   if (!canvas || !canvasReady.value) return
@@ -598,38 +736,81 @@ const saveWhiteboard = async () => {
     const canvasContent = canvas.toJSON()
     const title = currentBoardTitle.value.trim() || `白板-${new Date().toLocaleString().slice(0, 10)}`
 
+    // 第一步：新白板先创建ID（仅在线时）
     if (isNewBoardFlag) {
+      if (!isOnline.value) {
+        alert('当前离线，无法创建新白板ID，请联网后重试')
+        isLoading.value = false
+        return
+      }
       const createRes = await fetch('/api/whiteboard/new', { method: 'POST' })
       const createData = await createRes.json()
       currentBoardId.value = createData.boardId
       isNewBoardFlag = false
     }
 
+    // 第二步：保存内容（区分在线/离线）
+    const saveData = {
+      boardId: currentBoardId.value,
+      title,
+      content: canvasContent
+    }
+
+    if (!isOnline.value) {
+      // 离线：缓存到本地
+      addToOfflineSaveQueue(saveData)
+      alert('当前离线，白板内容已缓存到本地，网络恢复后会自动保存！')
+      isLoading.value = false
+      return
+    }
+
+    // 在线：正常发送保存请求
     const saveRes = await fetch('/api/whiteboard/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        boardId: currentBoardId.value,
-        title,
-        content: canvasContent
-      })
+      body: JSON.stringify(saveData)
     })
-    const saveData = await saveRes.json()
-    if (saveData.success) {
+    const saveDataRes = await saveRes.json()
+    if (saveDataRes.success) {
       alert('保存成功！')
       await fetchAllBoards()
     }
   } catch (err) {
     console.error('保存失败：', err)
-    alert('保存失败，请检查后端是否启动')
+    // 新增：在线但请求失败时，也缓存到本地
+    if (isOnline.value) {
+      alert('保存请求失败，内容已缓存到本地，稍后会自动重试！')
+      const canvasContent = canvasInstance.value.toJSON()
+      const title = currentBoardTitle.value.trim() || `白板-${new Date().toLocaleString().slice(0, 10)}`
+      addToOfflineSaveQueue({
+        boardId: currentBoardId.value,
+        title,
+        content: canvasContent
+      })
+    } else {
+      alert('保存失败，请检查后端是否启动')
+    }
   } finally {
     isLoading.value = false
   }
 }
 
-// 更新白板标题
+// 更新白板标题（修改：增加离线处理）
 const updateBoardTitle = async () => {
   if (isNewBoardFlag || !currentBoardId.value || !canvasReady.value) return
+  
+  // 离线：缓存标题修改
+  if (!isOnline.value) {
+    const canvasContent = canvasInstance.value?.toJSON() || {}
+    addToOfflineSaveQueue({
+      boardId: currentBoardId.value,
+      title: currentBoardTitle.value.trim(),
+      content: canvasContent
+    })
+    console.log('离线修改标题，已缓存')
+    return
+  }
+  
   try {
     await fetch('/api/whiteboard/save', {
       method: 'POST',
@@ -906,10 +1087,16 @@ const deleteActiveElement = () => {
   }
 }
 
-// 生成分享链接
+// 生成分享链接（修改：离线时提示）
 const generateShareLink = async () => {
   const canvas = canvasInstance.value
   if (!canvas || !canvasReady.value) return
+
+  // 离线：禁止生成链接
+  if (!isOnline.value) {
+    alert('当前离线，无法生成分享链接，请联网后重试')
+    return
+  }
 
   // 新白板要先保存才能生成链接
   if (isNewBoardFlag || !currentBoardId.value) {
@@ -965,7 +1152,7 @@ watch([currentColor, currentStrokeWidth, isDashed], () => {
   }
 })
 
-// 键盘快捷键处理
+// 键盘快捷键处理（已改：Alt+快捷键）
 const toolShortcuts = {
   'select': 'v',
   'pen': 'p',
@@ -1021,7 +1208,7 @@ watch(currentTool, (newTool) => {
 </script>
 
 <style scoped>
-/* 样式部分保持不变 */
+/* 样式部分完全不变，和之前一致 */
 html, body {
   touch-action: manipulation;
   overflow-x: hidden;
